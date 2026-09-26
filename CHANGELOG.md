@@ -4,13 +4,37 @@
 
 ### Changed
 
-- The panel uses the bar's colours. The graph draws upload in blue and
-  download in green, the legend matches, and the live rates for the physical
-  link and the tunnel are coloured the same way. A row with nothing to show
-  stays dim. The colours are read from the bar widget, so the two cannot
-  drift apart.
-- `preview.png` is retaken to show the coloured panel, again with no
-  metadata.
+- The graph draws upload in blue (#58a6ff) and download in green (#3fb950),
+  the colours the bar already uses. Before this, download was drawn in the
+  theme's text colour and upload in a darker shade of it. Two greys that
+  differ only in brightness are hard to tell apart where the lines cross or
+  sit close together, and they gave no link back to the bar. With the same
+  colours in both places, blue always means upload and green always means
+  download.
+- The legend under the graph uses the same colours, because it draws its
+  swatches from the graph.
+- The live rates for the physical link (the Wi-Fi row) and for the tunnel are
+  coloured the same way, so the numbers match the graph beside them and the
+  bar above them.
+- A row with nothing to measure stays dim, for example the tunnel row when
+  the VPN is down. A coloured "not up" or "--" would look like a live
+  reading.
+- The column headings and the DATA USED rows are not coloured. The headings
+  already carry the arrows, and the usage rows are totals over a day, not
+  live rates. Colour there would stop marking what is happening now.
+- The panel reads the colours from the bar widget instead of keeping its own
+  copy, so changing them in `BarWidget.qml` changes both places at once. The
+  panel falls back to the same two values if it is ever loaded without the
+  bar widget.
+- In the graph, the lines have no arrows or row order to fall back on, so the
+  note under 0.3.0 about blue-yellow colour blindness applies more strongly.
+  There, the legend and the fact that download is drawn on top are what tell
+  the two lines apart.
+- `preview.png` is retaken to show the coloured panel. Like the old one, it
+  holds only the chunks needed to display it (IHDR, IDAT and IEND). Cropping
+  had added a timestamp and text chunks, and they were removed so the image
+  publishes nothing about when or how it was made.
+  `docs/panel-vpn-down.png` still shows the panel before this change.
 
 ## 0.3.0 - 2026-09-26
 
