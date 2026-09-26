@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "id": "brightwalker25.net-speed",
+  "name": "Net Speed Colour",
+  "version": "0.3.0",
+  "author": "brightwalker25",
+  "license": "MIT",
+  "description": "Live upload and download on the physical network link, with the VPN tunnel and daily usage in a panel",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Net Speed Colour",
+    "description": "Upload over download for the physical Wi-Fi or Ethernet link, never a tunnel or kill-switch interface. The panel shows the VPN tunnel beside it, a short speed graph and the data used today and over the last seven days",
+    "category": "Network",
+    "aliases": [
+      "network",
+      "speed",
+      "bandwidth",
+      "wifi",
+      "ethernet",
+      "vpn",
+      "traffic",
+      "usage"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "intervalMs": 1000,
+      "interface": "auto",
+      "units": "bits"
+    },
+    "schema": [
+      {
+        "key": "intervalMs",
+        "type": "integer",
+        "label": "Refresh interval (ms)",
+        "min": 500,
+        "max": 5000,
+        "step": 250,
+        "defaultValue": 1000,
+        "description": "How often the rates are measured. The collector only reads counters under /sys, so a second is cheap."
+      },
+      {
+        "key": "interface",
+        "type": "string",
+        "label": "Interface",
+        "defaultValue": "auto",
+        "description": "auto picks the physical link that carries the default route. Give an interface name to pin it instead."
+      },
+      {
+        "key": "units",
+        "type": "enum",
+        "label": "Units",
+        "options": [
+          "bytes",
+          "bits"
+        ],
+        "defaultValue": "bits",
+        "description": "bits shows Kb/s and Mb/s (1000 base), as broadband speeds are quoted; bytes shows KB/s and MB/s (1024 base). Both change unit with the speed."
+      }
+    ]
+  }
+}

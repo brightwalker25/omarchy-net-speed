@@ -1,0 +1,385 @@
+#!/usr/bin/env python3
+"""Emit one snapshot of network counters as JSON, for the
+brightwalker25.net-speed bar widget.
+
+Usage: net-speed [--iface auto|NAME] [--no-record]
+
+Design notes:
+
+- Stateless apart from the usage file. Byte counters are printed raw with a
+  monotonic timestamp and the bar takes deltas between two snapshots to get
+  rates. Nothing sleeps, nothing runs a subprocess, nothing touches the
+  network, so one call costs a pass over sysfs and one small file.
+- The measured link is the physical interface, never the route-following
+  default. VPN clients commonly install a kill-switch dummy with the lowest
+  default-route metric; following the route would measure that dummy, which
+  carries no traffic. Only interfaces with a device node are candidates.
+- The process always exits 0 and always prints a JSON object. Failures are
+  reported in "error" so the bar can show a placeholder instead of breaking.
+
+Test hooks (environment): NET_SPEED_SYSFS, NET_SPEED_PROC, NET_SPEED_STATE,
+NET_SPEED_TODAY.
+"""
+import json
+import os
+import sys
+import time
+
+VERSION = 1
+WRITE_INTERVAL_S = 30
+KEEP_DAYS = 31
+SHOW_DAYS = 7
+
+TUNNEL_PREFIXES = ("wg", "tun", "proton", "tailscale", "nordlynx", "mullvad")
+ARPHRD_ETHER = 1
+ARPHRD_NONE = 65534
+IFF_UP = 0x1
+
+
+def read(path, default=None):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return default
+
+
+def read_int(path, default=0):
+    value = read(path)
+    if value is None:
+        return default
+    try:
+        return int(value, 0)
+    except ValueError:
+        return default
+
+
+def classify(base, name):
+    """Return (kind, physical) for one interface directory."""
+    path = os.path.join(base, name)
+    physical = os.path.exists(os.path.join(path, "device"))
+    iftype = read_int(os.path.join(path, "type"), -1)
+
+    if os.path.isdir(os.path.join(path, "wireless")) or os.path.exists(
+        os.path.join(path, "phy80211")
+    ):
+        return "wifi", physical
+    if physical:
+        subsystem = os.path.realpath(os.path.join(path, "device", "subsystem"))
+        if os.path.basename(subsystem) == "usb":
+            return "usb", True
+        if iftype == ARPHRD_ETHER:
+            return "ethernet", True
+        return "other", True
+
+    if (
+        iftype == ARPHRD_NONE
+        or (iftype == ARPHRD_ETHER and os.path.exists(os.path.join(path, "tun_flags")))
+        or name.startswith(TUNNEL_PREFIXES)
+    ):
+        return "tunnel", False
+    if iftype == ARPHRD_ETHER:
+        # Bridges and bonds are virtual type 1 devices too, but they carry
+        # real traffic, so they are not dummies.
+        if os.path.isdir(os.path.join(path, "bridge")) or os.path.isdir(
+            os.path.join(path, "bonding")
+        ):
+            return "other", False
+        return "dummy", False
+    return "other", False
+
+
+def scan(base):
+    ifaces = []
+    for name in sorted(os.listdir(base)):
+        if name == "lo":
+            continue
+        path = os.path.join(base, name)
+        if not os.path.isdir(path):
+            continue
+        kind, physical = classify(base, name)
+        operstate = read(os.path.join(path, "operstate"), "unknown")
+        flags = read_int(os.path.join(path, "flags"), IFF_UP)
+        up = operstate in ("up", "unknown") and bool(flags & IFF_UP)
+        stats = os.path.join(path, "statistics")
+        ifaces.append(
+            {
+                "name": name,
+                "kind": kind,
+                "up": up,
+                "physical": physical,
+                "rx": read_int(os.path.join(stats, "rx_bytes")),
+                "tx": read_int(os.path.join(stats, "tx_bytes")),
+                "_operstate": operstate,
+            }
+        )
+    return ifaces
+
+
+def default_routes(proc):
+    """Map interface name to its lowest IPv4 default-route metric."""
+    routes = {}
+    try:
+        with open(os.path.join(proc, "net", "route")) as f:
+            lines = f.read().splitlines()[1:]
+    except OSError:
+        return routes
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 8:
+            continue
+        name, dest, flags, metric, mask = fields[0], fields[1], fields[3], fields[6], fields[7]
+        try:
+            if int(dest, 16) or int(mask, 16) or not int(flags, 16) & 0x1:
+                continue
+            metric = int(metric)
+        except ValueError:
+            continue
+        if name not in routes or metric < routes[name]:
+            routes[name] = metric
+    return routes
+
+
+def pick_link(ifaces, routes):
+    candidates = [i for i in ifaces if i["physical"] and i["_operstate"] == "up"]
+    if not candidates:
+        return None
+    routed = [i for i in candidates if i["name"] in routes]
+    if routed:
+        return min(routed, key=lambda i: (routes[i["name"]], i["name"]))
+    return max(candidates, key=lambda i: i["rx"])
+
+
+def pick_tunnel(ifaces, routes):
+    tunnels = [
+        i for i in ifaces
+        if i["kind"] == "tunnel" and i["_operstate"] in ("up", "unknown") and i["up"]
+    ]
+    if not tunnels:
+        return None
+    routed = [i for i in tunnels if i["name"] in routes]
+    return routed[0] if routed else tunnels[0]
+
+
+# Usage recording -----------------------------------------------------------
+
+
+def state_path():
+    base = os.environ.get("NET_SPEED_STATE")
+    if not base:
+        xdg = os.environ.get("XDG_STATE_HOME") or os.path.join(
+            os.path.expanduser("~"), ".local", "state"
+        )
+        base = os.path.join(xdg, "omarchy-net-speed")
+    return os.path.join(base, "usage.json")
+
+
+def load_state(path):
+    """Return (state, is_new). A missing, corrupt or odd file counts as new."""
+    try:
+        with open(path) as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        return None, True
+    if (
+        not isinstance(state, dict)
+        or not isinstance(state.get("days"), dict)
+        or not isinstance(state.get("last"), dict)
+    ):
+        return None, True
+    return state, False
+
+
+def counter(value):
+    return value if isinstance(value, int) and value >= 0 else 0
+
+
+def save_state(path, state):
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    tmp = os.path.join(directory, ".usage.%d.tmp" % os.getpid())
+    try:
+        with open(tmp, "w") as f:
+            json.dump(state, f, separators=(",", ":"), sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def record_usage(ifaces, proc, today, record):
+    """Update the usage file and return (today_entry, days_list)."""
+    path = state_path()
+    state, is_new = load_state(path)
+    boot_id = read(os.path.join(proc, "sys", "kernel", "random", "boot_id"), "")
+    physical = {i["name"]: i for i in ifaces if i["physical"]}
+
+    if state is None:
+        state = {"v": VERSION, "boot_id": boot_id, "last": {}, "days": {}, "saved": 0, "date": ""}
+
+    days = state["days"]
+    if record:
+        last = state["last"]
+        rebooted = not is_new and state.get("boot_id") != boot_id
+        add_rx = add_tx = 0
+        if not is_new:
+            for name, iface in physical.items():
+                prev = last.get(name)
+                prev = prev if isinstance(prev, dict) else {}
+                for key in ("rx", "tx"):
+                    cur = iface[key]
+                    old = prev.get(key)
+                    if rebooted or not isinstance(old, int) or cur < old:
+                        delta = cur
+                    else:
+                        delta = cur - old
+                    if key == "rx":
+                        add_rx += delta
+                    else:
+                        add_tx += delta
+        entry = days.get(today)
+        entry = entry if isinstance(entry, dict) else {}
+        days[today] = {
+            "rx": counter(entry.get("rx")) + add_rx,
+            "tx": counter(entry.get("tx")) + add_tx,
+        }
+
+        now = time.time()
+        saved = state.get("saved")
+        saved = saved if isinstance(saved, (int, float)) else 0
+        due = (
+            is_new
+            or state.get("date") != today
+            or now - saved >= WRITE_INTERVAL_S
+            or now < saved
+        )
+        if due:
+            from datetime import date, timedelta
+
+            cutoff = (date.fromisoformat(today) - timedelta(days=KEEP_DAYS - 1)).isoformat()
+            state["days"] = days = {d: v for d, v in days.items() if cutoff <= d <= today}
+            state["last"] = {n: {"rx": i["rx"], "tx": i["tx"]} for n, i in physical.items()}
+            state["boot_id"] = boot_id
+            state["saved"] = now
+            state["date"] = today
+            state["v"] = VERSION
+            save_state(path, state)
+
+    return summarise(days, today)
+
+
+def summarise(days, today):
+    from datetime import date, timedelta
+
+    start = date.fromisoformat(today)
+    listed = []
+    for n in range(SHOW_DAYS):
+        d = (start - timedelta(days=n)).isoformat()
+        entry = days.get(d)
+        if n == 0 or isinstance(entry, dict):
+            entry = entry if isinstance(entry, dict) else {}
+            listed.append({"date": d, "rx": counter(entry.get("rx")), "tx": counter(entry.get("tx"))})
+    return listed[0], listed
+
+
+# Entry point ---------------------------------------------------------------
+
+
+def parse_args(argv):
+    iface, record, errors = "auto", True, []
+    args = list(argv)
+    while args:
+        arg = args.pop(0)
+        if arg == "--no-record":
+            record = False
+        elif arg == "--iface":
+            if args:
+                iface = args.pop(0) or "auto"
+            else:
+                errors.append("--iface needs a value")
+        elif arg.startswith("--iface="):
+            iface = arg.split("=", 1)[1] or "auto"
+        else:
+            errors.append("unknown argument: %s" % arg)
+    return iface, record, errors
+
+
+def collect(argv):
+    out = {
+        "v": VERSION,
+        "mono": time.monotonic(),
+        "link": None,
+        "tunnel": None,
+        "ifaces": [],
+        "today": None,
+        "days": [],
+        "error": None,
+    }
+    errors = []
+    wanted, record, arg_errors = parse_args(argv)
+    errors.extend(arg_errors)
+
+    sysfs = os.environ.get("NET_SPEED_SYSFS") or "/sys/class/net"
+    proc = os.environ.get("NET_SPEED_PROC") or "/proc"
+    today = os.environ.get("NET_SPEED_TODAY") or time.strftime("%Y-%m-%d")
+
+    ifaces = []
+    try:
+        ifaces = scan(sysfs)
+        routes = default_routes(proc)
+        if wanted == "auto":
+            link, reason = pick_link(ifaces, routes), "auto"
+        else:
+            link = next((i for i in ifaces if i["name"] == wanted), None)
+            reason = "pinned"
+            if link is None:
+                errors.append("interface not found: %s" % wanted)
+        if link is not None:
+            out["link"] = {
+                "name": link["name"],
+                "kind": link["kind"],
+                "up": link["up"],
+                "rx": link["rx"],
+                "tx": link["tx"],
+                "reason": reason,
+            }
+        tunnel = pick_tunnel(ifaces, routes)
+        if tunnel is not None:
+            out["tunnel"] = {"name": tunnel["name"], "rx": tunnel["rx"], "tx": tunnel["tx"]}
+        out["ifaces"] = [
+            {k: v for k, v in i.items() if not k.startswith("_")} for i in ifaces
+        ]
+    except Exception as e:  # noqa: BLE001 - the bar must always get JSON
+        errors.append("scan failed: %s" % e)
+
+    try:
+        out["today"], out["days"] = record_usage(ifaces, proc, today, record)
+    except Exception as e:  # noqa: BLE001
+        errors.append("usage failed: %s" % e)
+        out["today"] = {"date": today, "rx": 0, "tx": 0}
+
+    if errors:
+        out["error"] = "; ".join(errors)
+    return out
+
+
+def main(argv=None):
+    try:
+        out = collect(sys.argv[1:] if argv is None else argv)
+    except Exception as e:  # noqa: BLE001
+        out = {"v": VERSION, "mono": time.monotonic(), "link": None, "tunnel": None,
+               "ifaces": [], "today": None, "days": [], "error": "failed: %s" % e}
+    sys.stdout.write(json.dumps(out, separators=(",", ":")) + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:  # noqa: BLE001 - never exit non-zero
+        pass
+    sys.exit(0)
