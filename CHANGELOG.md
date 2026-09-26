@@ -34,7 +34,8 @@
   holds only the chunks needed to display it (IHDR, IDAT and IEND). Cropping
   had added a timestamp and text chunks, and they were removed so the image
   publishes nothing about when or how it was made.
-  `docs/panel-vpn-down.png` still shows the panel before this change.
+  `docs/panel-vpn-down.png` is retaken the same way, with the same
+  three chunks only.
 
 ## 0.3.0 - 2026-09-26
 
