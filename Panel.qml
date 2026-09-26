@@ -40,6 +40,11 @@ Panel {
   readonly property color warnColor: "#d29922"
   readonly property color badColor: "#f85149"
 
+  // Up and down take the bar's colours, read from the bar widget so the two
+  // cannot drift apart.
+  readonly property color upColor: hostWidget ? hostWidget.upColor : "#58a6ff"
+  readonly property color downColor: hostWidget ? hostWidget.downColor : "#3fb950"
+
   // ------------------------------------------------------ from the bar widget
 
   readonly property var snap: hostWidget && hostWidget.snapshot ? hostWidget.snapshot : null
@@ -254,6 +259,8 @@ Panel {
     property string up: ""
     property string down: ""
     property bool muted: false
+    // Live rates take the up and down colours; a muted row stays dim.
+    property bool tinted: false
     readonly property real column: Math.round(width * 0.3)
     implicitHeight: speedLabel.implicitHeight
 
@@ -277,7 +284,7 @@ Panel {
       horizontalAlignment: Text.AlignRight
       textFormat: Text.PlainText
       text: speedRow.up
-      color: speedRow.muted ? root.dim : root.foreground
+      color: speedRow.muted ? root.dim : speedRow.tinted ? root.upColor : root.foreground
       font.family: root.fontFamily
       font.pixelSize: Style.font.body
     }
@@ -290,7 +297,7 @@ Panel {
       horizontalAlignment: Text.AlignRight
       textFormat: Text.PlainText
       text: speedRow.down
-      color: speedRow.muted ? root.dim : root.foreground
+      color: speedRow.muted ? root.dim : speedRow.tinted ? root.downColor : root.foreground
       font.family: root.fontFamily
       font.pixelSize: Style.font.body
     }
@@ -427,6 +434,7 @@ Panel {
               up: root.link ? root.fmtRate(root.linkTx) : "--"
               down: root.link ? root.fmtRate(root.linkRx) : "--"
               muted: !root.link
+              tinted: true
             }
 
             SpeedRow {
@@ -435,6 +443,7 @@ Panel {
               up: root.tunnel ? root.fmtRate(root.tunnelTx) : "--"
               down: root.tunnel ? root.fmtRate(root.tunnelRx) : "not up"
               muted: !root.tunnel
+              tinted: true
             }
 
             StatRow {
@@ -472,14 +481,15 @@ Panel {
               // along the bottom rather than magnifying a few stray packets
               // to fill the height.
               readonly property real ceiling: Math.max(peak, 4096)
-              readonly property color downColor: root.foreground
-              readonly property color upColor: root.dim
+              readonly property color downColor: root.downColor
+              readonly property color upColor: root.upColor
               readonly property color gridColor: Style.selectedFillFor(root.foreground, Color.accent)
 
               onSamplesChanged: requestPaint()
               onWidthChanged: requestPaint()
               onHeightChanged: requestPaint()
               onDownColorChanged: requestPaint()
+              onUpColorChanged: requestPaint()
 
               function trace(ctx, key, colour) {
                 var s = graph.samples

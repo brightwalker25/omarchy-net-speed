@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.1 - 2026-09-26
+
+### Changed
+
+- The panel uses the bar's colours. The graph draws upload in blue and
+  download in green, the legend matches, and the live rates for the physical
+  link and the tunnel are coloured the same way. A row with nothing to show
+  stays dim. The colours are read from the bar widget, so the two cannot
+  drift apart.
+- `preview.png` is retaken to show the coloured panel, again with no
+  metadata.
+
 ## 0.3.0 - 2026-09-26
 
 ### Changed
